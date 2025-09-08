@@ -38,7 +38,10 @@
 
 /* Private macro -------------------------------------------------------------*/
 /* USER CODE BEGIN PM */
-#define SPEED_CAN_ID   0x7E8
+
+// GPIO definitions
+#define LED_PORT       GPIOC
+#define LED_PIN        GPIO_PIN_0
 #define DAC1_CS_PORT   GPIOA
 #define DAC1_CS_PIN    GPIO_PIN_0
 #define DAC2_CS_PORT   GPIOA
@@ -46,8 +49,24 @@
 #define MUX_EN_PORT    GPIOC
 #define MUX_EN_PIN     GPIO_PIN_9
 
-#define ADC_REF_VOLTAGE 3.3f // THIS VALUE IS ASSUMED AND NEED TO BE CONFIRMED - STM32 REFERENCE VOLTAGE?
-#define ADC_RESOLUTION 4095.0f // THIS VALUE IS ASSUMED AND NEED TO BE CONFIRMED - 12 BIT ADC
+// ADC Parameters
+#define ADC_REF_VOLTAGE 3.3f
+#define ADC_RESOLUTION  4095.0f
+
+// Speed amd CAN related parameters
+#define SPEED_CAN_ID   		  0x7E8
+#define SPEED_THRESHOLD_KMH   30
+#define SPEED_FADE_RANGE_KMH  20
+
+//Pedal processing parameters
+#define VoltageRestoreFactor 2.0f
+#define preproccsing_percent_current_voltage_Max 1.0f
+#define preproccsing_percent_current_voltage_Min 0.0f
+
+//Scaling Factor limits
+#define Scale_Factor_Max 1.0f
+#define Scale_Factor_Min 0.0f
+
 /* USER CODE END PM */
 
 /* Private variables ---------------------------------------------------------*/
@@ -63,15 +82,19 @@ SPI_HandleTypeDef hspi1;
 UART_HandleTypeDef huart1;
 
 /* USER CODE BEGIN PV */
+// CAN reception
 CAN_RxHeaderTypeDef RxHeader;
 uint8_t CANResponse[8];
-volatile uint16_t CarSpeed;
+volatile uint16_t CarSpeed = 0;
 
+// UART buffer
 char uartBuffer[100];
 
+// ADC raw values
 volatile uint16_t adc_val1;
 volatile uint16_t adc_val2;
 
+// Pedal channel limits
 float PEDAL_CH1_VMIN = 0.5f; //THIS VALUE IS ASSUMED AND NEED TO BE CONFIRMED
 float PEDAL_CH1_VMAX = 4.5f; //THIS VALUE IS ASSUMED AND NEED TO BE CONFIRMED
 float PEDAL_CH2_VMIN = 0.5f; //THIS VALUE IS ASSUMED AND NEED TO BE CONFIRMED
@@ -95,6 +118,8 @@ void UART_SendString(char *str);
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+
+// CAN Messages filter
 void CAN_Filter_Config(void)
 {
     CAN_FilterTypeDef sFilterConfig;
@@ -117,6 +142,7 @@ void CAN_Filter_Config(void)
     }
 }
 
+// OBD-II PID Speed Request
 void RequestSpeed(){
 	CAN_TxHeaderTypeDef TxHeader;
 	uint8_t TxData[8] = {0x02, 0x01, 0x0D, 0x00, 0x00, 0x00, 0x00, 0x00};
@@ -135,6 +161,7 @@ void RequestSpeed(){
 
 }
 
+// Speed extraction
 void ProcessSpeedMessage(CAN_RxHeaderTypeDef *rxHeader, uint8_t *CANResponse)
 {
 	if (rxHeader->StdId == SPEED_CAN_ID) {
@@ -153,6 +180,7 @@ void ProcessSpeedMessage(CAN_RxHeaderTypeDef *rxHeader, uint8_t *CANResponse)
 
 }
 
+//CAN Response upon interrupt callback
 void HAL_CAN_RxFifo0MsgPendingCallback(CAN_HandleTypeDef *hcan)
 {
     if (HAL_CAN_GetRxMessage(hcan, CAN_RX_FIFO0, &RxHeader, CANResponse) == HAL_OK)
@@ -161,6 +189,7 @@ void HAL_CAN_RxFifo0MsgPendingCallback(CAN_HandleTypeDef *hcan)
     }
 }
 
+// Write 12-bit value to DAC via SPI
 void DAC_Write(GPIO_TypeDef *cs_port, uint16_t cs_pin, uint16_t value)
 {
     value &= 0x0FFF;    // ensure 12-bit value
@@ -175,38 +204,42 @@ void DAC_Write(GPIO_TypeDef *cs_port, uint16_t cs_pin, uint16_t value)
     HAL_GPIO_WritePin(cs_port, cs_pin, GPIO_PIN_SET);
 }
 
+// Convert ADC value to normalized pedal percentage
 float ReadPedalPercent(uint16_t adc_value, float voltage_min, float voltage_max){
 
 	float preproccsing_current_voltage_divided = ((float)adc_value / ADC_RESOLUTION)*ADC_REF_VOLTAGE;
-	float preproccsing_current_voltage = preproccsing_current_voltage_divided * 2.0f;
+	float preproccsing_current_voltage = preproccsing_current_voltage_divided * VoltageRestoreFactor;
 	float preproccsing_percent_current_voltage = (preproccsing_current_voltage - voltage_min) / (voltage_max - voltage_min);
 
-    if (preproccsing_percent_current_voltage < 0.0f) preproccsing_percent_current_voltage = 0.0f;
-    if (preproccsing_percent_current_voltage > 1.0f) preproccsing_percent_current_voltage = 1.0f;
+    if (preproccsing_percent_current_voltage <preproccsing_percent_current_voltage_Min) preproccsing_percent_current_voltage = preproccsing_percent_current_voltage_Min;
+    if (preproccsing_percent_current_voltage > preproccsing_percent_current_voltage_Max) preproccsing_percent_current_voltage = preproccsing_percent_current_voltage_Max;
 
     return preproccsing_percent_current_voltage;
 }
 
+
+// Convert pedal percentage to DAC output code
 uint16_t PercentToDACValue(float percent, float voltage_min, float voltage_max) {
 
     float afterprocessing_voltage = voltage_min + (percent * (voltage_max - voltage_min)); //Percentage to voltage
     uint16_t dac_value = (uint16_t)((afterprocessing_voltage / ADC_REF_VOLTAGE) * ADC_RESOLUTION); //DAC expects digital value
 
-    if (dac_value > 4095) dac_value = 4095;
+    if (dac_value > ADC_RESOLUTION ) dac_value = ADC_RESOLUTION ;
     return dac_value;
 }
 
+// Apply pedal attenuation based on vehicle speed
 void AttenuationFunction(void){
 
 	float percent1, percent2, output_percent1, output_percent2;
 	percent1 = ReadPedalPercent(adc_val1, PEDAL_CH1_VMIN, PEDAL_CH1_VMAX); //Converts the raw value from adc to percentage
 	percent2 = ReadPedalPercent(adc_val2, PEDAL_CH2_VMIN, PEDAL_CH2_VMAX); //Converts the raw value from adc to percentage
 
-    if(CarSpeed >= 0x28) {
+    if(CarSpeed >= SPEED_THRESHOLD_KMH) {
 
-        float overspeed = CarSpeed - 40.0f;
-        float scale_factor = 1.0f - (overspeed / 20.0f);
-        if (scale_factor < 0.0f) scale_factor = 0.0f;
+        float overspeed = CarSpeed - SPEED_THRESHOLD_KMH;
+        float scale_factor = Scale_Factor_Max - (overspeed / (float)SPEED_FADE_RANGE_KMH);
+        if (scale_factor < Scale_Factor_Min) scale_factor = Scale_Factor_Min;
         output_percent1 = percent1 * scale_factor;
         output_percent2 = percent2 * scale_factor;
     } else {
@@ -259,6 +292,7 @@ int main(void)
 
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
+  HAL_GPIO_WritePin(LED_PORT, LED_PIN, GPIO_PIN_SET);
   MX_DMA_Init();
   MX_ADC1_Init();
   MX_CAN1_Init();
@@ -292,7 +326,7 @@ int main(void)
   {
     /* USER CODE END WHILE */
 	RequestSpeed();
-	HAL_Delay(100); //SOLVED CAR ISSUE (WAS NOT GETTING CAN MESSAGES ON CAR)
+	HAL_Delay(100); //Sending too fast causes STM CAN to fault out.
 
 	AttenuationFunction();
     /* USER CODE BEGIN 3 */
