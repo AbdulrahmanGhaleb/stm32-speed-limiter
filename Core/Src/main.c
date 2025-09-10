@@ -71,9 +71,7 @@
 
 /* Private variables ---------------------------------------------------------*/
 ADC_HandleTypeDef hadc1;
-ADC_HandleTypeDef hadc2;
 DMA_HandleTypeDef hdma_adc1;
-DMA_HandleTypeDef hdma_adc2;
 
 CAN_HandleTypeDef hcan1;
 
@@ -86,19 +84,20 @@ UART_HandleTypeDef huart1;
 CAN_RxHeaderTypeDef RxHeader;
 uint8_t CANResponse[8];
 volatile uint16_t CarSpeed = 0;
+volatile uint32_t lastCanMsgTick = 0;
+
 
 // UART buffer
 char uartBuffer[100];
 
 // ADC raw values
-volatile uint16_t adc_val1;
-volatile uint16_t adc_val2;
+volatile uint16_t adc_buf[2];
 
 // Pedal channel limits
-float PEDAL_CH1_VMIN = 0.5f; //THIS VALUE IS ASSUMED AND NEED TO BE CONFIRMED
-float PEDAL_CH1_VMAX = 4.5f; //THIS VALUE IS ASSUMED AND NEED TO BE CONFIRMED
-float PEDAL_CH2_VMIN = 0.5f; //THIS VALUE IS ASSUMED AND NEED TO BE CONFIRMED
-float PEDAL_CH2_VMAX = 4.5f; //THIS VALUE IS ASSUMED AND NEED TO BE CONFIRMED
+float PEDAL_CH1_VMIN = 1.56f; //THIS VALUE IS ASSUMED AND NEED TO BE CONFIRMED
+float PEDAL_CH1_VMAX = 4.435f; //THIS VALUE IS ASSUMED AND NEED TO BE CONFIRMED
+float PEDAL_CH2_VMIN = 0.769f; //THIS VALUE IS ASSUMED AND NEED TO BE CONFIRMED
+float PEDAL_CH2_VMAX = 3.644f; //THIS VALUE IS ASSUMED AND NEED TO BE CONFIRMED
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -109,7 +108,6 @@ static void MX_ADC1_Init(void);
 static void MX_CAN1_Init(void);
 static void MX_SPI1_Init(void);
 static void MX_USART1_UART_Init(void);
-static void MX_ADC2_Init(void);
 /* USER CODE BEGIN PFP */
 void CAN_Filter_Config(void);
 void ProcessSpeedMessage(CAN_RxHeaderTypeDef *rxHeader, uint8_t *rxData);
@@ -167,6 +165,7 @@ void ProcessSpeedMessage(CAN_RxHeaderTypeDef *rxHeader, uint8_t *CANResponse)
 	if (rxHeader->StdId == SPEED_CAN_ID) {
 
 		CarSpeed = CANResponse[3];
+		lastCanMsgTick = HAL_GetTick();
 
         snprintf(uartBuffer, sizeof(uartBuffer),
                 "Message Received!\r\nID: 0x%03lX\r\nData: %02X %02X %02X %02X %02X %02X %02X %02X\r\n\r\n Speed:%02X\r\n",
@@ -201,6 +200,12 @@ void DAC_Write(GPIO_TypeDef *cs_port, uint16_t cs_pin, uint16_t value)
 
     HAL_GPIO_WritePin(cs_port, cs_pin, GPIO_PIN_RESET); // CS LOW
     HAL_SPI_Transmit(&hspi1, data, 2, HAL_MAX_DELAY);
+    snprintf(uartBuffer, sizeof(uartBuffer),
+             "DAC%d Write: Code=%u\r\n\n",
+             (cs_pin == DAC1_CS_PIN) ? 1 : 2,
+             value);
+    UART_SendString(uartBuffer);
+
     HAL_GPIO_WritePin(cs_port, cs_pin, GPIO_PIN_SET);
 }
 
@@ -210,6 +215,14 @@ float ReadPedalPercent(uint16_t adc_value, float voltage_min, float voltage_max)
 	float preproccsing_current_voltage_divided = ((float)adc_value / ADC_RESOLUTION)*ADC_REF_VOLTAGE;
 	float preproccsing_current_voltage = preproccsing_current_voltage_divided * VoltageRestoreFactor;
 	float preproccsing_percent_current_voltage = (preproccsing_current_voltage - voltage_min) / (voltage_max - voltage_min);
+
+	snprintf(uartBuffer, sizeof(uartBuffer),
+	         "ADC=%u | Vin=%.2f V | Percent=%.2f%%\r\n\n",
+	         adc_value,
+	         preproccsing_current_voltage,
+	         preproccsing_percent_current_voltage);
+	UART_SendString(uartBuffer);
+
 
     if (preproccsing_percent_current_voltage <preproccsing_percent_current_voltage_Min) preproccsing_percent_current_voltage = preproccsing_percent_current_voltage_Min;
     if (preproccsing_percent_current_voltage > preproccsing_percent_current_voltage_Max) preproccsing_percent_current_voltage = preproccsing_percent_current_voltage_Max;
@@ -222,7 +235,15 @@ float ReadPedalPercent(uint16_t adc_value, float voltage_min, float voltage_max)
 uint16_t PercentToDACValue(float percent, float voltage_min, float voltage_max) {
 
     float afterprocessing_voltage = voltage_min + (percent * (voltage_max - voltage_min)); //Percentage to voltage
-    uint16_t dac_value = (uint16_t)((afterprocessing_voltage / ADC_REF_VOLTAGE) * ADC_RESOLUTION); //DAC expects digital value
+    uint16_t dac_value = (uint16_t)((afterprocessing_voltage / 4.88f) * ADC_RESOLUTION); //DAC expects digital value CHECK THIS - WRONG REF VOLTAGE - changed ref to 4.88v(supply)
+
+    snprintf(uartBuffer, sizeof(uartBuffer),
+             "Attenuated=%.2f%% | Vout=%.2f V | DAC Code=%u\r\n\n",
+             percent,
+             afterprocessing_voltage,
+             dac_value);
+    UART_SendString(uartBuffer);
+
 
     if (dac_value > ADC_RESOLUTION ) dac_value = ADC_RESOLUTION ;
     return dac_value;
@@ -230,15 +251,17 @@ uint16_t PercentToDACValue(float percent, float voltage_min, float voltage_max) 
 
 // Apply pedal attenuation based on vehicle speed
 void AttenuationFunction(void){
-
+	float scale_factor;
 	float percent1, percent2, output_percent1, output_percent2;
-	percent1 = ReadPedalPercent(adc_val1, PEDAL_CH1_VMIN, PEDAL_CH1_VMAX); //Converts the raw value from adc to percentage
-	percent2 = ReadPedalPercent(adc_val2, PEDAL_CH2_VMIN, PEDAL_CH2_VMAX); //Converts the raw value from adc to percentage
+
+	percent1 = ReadPedalPercent(adc_buf[0], PEDAL_CH1_VMIN, PEDAL_CH1_VMAX); //Converts the raw value from adc to percentage
+	percent2 = ReadPedalPercent(adc_buf[1], PEDAL_CH2_VMIN, PEDAL_CH2_VMAX); //Converts the raw value from adc to percentage
+
 
     if(CarSpeed >= SPEED_THRESHOLD_KMH) {
 
         float overspeed = CarSpeed - SPEED_THRESHOLD_KMH;
-        float scale_factor = Scale_Factor_Max - (overspeed / (float)SPEED_FADE_RANGE_KMH);
+        scale_factor = Scale_Factor_Max - (overspeed / (float)SPEED_FADE_RANGE_KMH);
         if (scale_factor < Scale_Factor_Min) scale_factor = Scale_Factor_Min;
         output_percent1 = percent1 * scale_factor;
         output_percent2 = percent2 * scale_factor;
@@ -254,6 +277,10 @@ void AttenuationFunction(void){
     DAC_Write(DAC1_CS_PORT, DAC1_CS_PIN, dac_value_1);
     DAC_Write(DAC2_CS_PORT, DAC2_CS_PIN, dac_value_2);
 
+   /* snprintf(uartBuffer, sizeof(uartBuffer),
+             " Scale: %.2f | P1 In:%.2f Out:%.2f | P2 In:%.2f Out:%.2f\r\n",
+             scale_factor, percent1, output_percent1, percent2, output_percent2);
+    UART_SendString(uartBuffer);*/
 }
 
 void UART_SendString(char *str)
@@ -298,14 +325,14 @@ int main(void)
   MX_CAN1_Init();
   MX_SPI1_Init();
   MX_USART1_UART_Init();
-  MX_ADC2_Init();
   /* USER CODE BEGIN 2 */
   HAL_GPIO_WritePin(MUX_EN_PORT, MUX_EN_PIN, GPIO_PIN_SET);
   HAL_GPIO_WritePin(DAC1_CS_PORT, DAC1_CS_PIN, GPIO_PIN_SET);
   HAL_GPIO_WritePin(DAC2_CS_PORT, DAC2_CS_PIN, GPIO_PIN_SET);
+  UART_SendString("Befor ADC dual channel Config\r\n");
 
-  HAL_ADC_Start_DMA(&hadc1,  (uint32_t*)&adc_val1, 1);
-  HAL_ADC_Start_DMA(&hadc2,  (uint32_t*)&adc_val2, 1);
+  HAL_ADC_Start_DMA(&hadc1, (uint32_t*)adc_buf, 2);
+  UART_SendString("After ADC dual channel Config\r\n");
 
   CAN_Filter_Config();
 
@@ -325,10 +352,16 @@ int main(void)
   while (1)
   {
     /* USER CODE END WHILE */
-	RequestSpeed();
-	HAL_Delay(100); //Sending too fast causes STM CAN to fault out.
 
-	AttenuationFunction();
+		RequestSpeed();
+		HAL_Delay(100); //Sending too fast causes STM CAN to fault out.
+		// Check if CAN messages stopped coming
+		if (HAL_GetTick() - lastCanMsgTick > 500)  // 500ms timeout
+		{
+		    CarSpeed = 0;   // fallback to 0 km/h
+		}
+
+		AttenuationFunction();
     /* USER CODE BEGIN 3 */
   }
   /* USER CODE END 3 */
@@ -402,13 +435,13 @@ static void MX_ADC1_Init(void)
   hadc1.Instance = ADC1;
   hadc1.Init.ClockPrescaler = ADC_CLOCK_SYNC_PCLK_DIV4;
   hadc1.Init.Resolution = ADC_RESOLUTION_12B;
-  hadc1.Init.ScanConvMode = DISABLE;
+  hadc1.Init.ScanConvMode = ENABLE;
   hadc1.Init.ContinuousConvMode = ENABLE;
   hadc1.Init.DiscontinuousConvMode = DISABLE;
   hadc1.Init.ExternalTrigConvEdge = ADC_EXTERNALTRIGCONVEDGE_NONE;
   hadc1.Init.ExternalTrigConv = ADC_SOFTWARE_START;
   hadc1.Init.DataAlign = ADC_DATAALIGN_RIGHT;
-  hadc1.Init.NbrOfConversion = 1;
+  hadc1.Init.NbrOfConversion = 2;
   hadc1.Init.DMAContinuousRequests = ENABLE;
   hadc1.Init.EOCSelection = ADC_EOC_SINGLE_CONV;
   if (HAL_ADC_Init(&hadc1) != HAL_OK)
@@ -420,50 +453,8 @@ static void MX_ADC1_Init(void)
   */
   sConfig.Channel = ADC_CHANNEL_2;
   sConfig.Rank = 1;
-  sConfig.SamplingTime = ADC_SAMPLETIME_3CYCLES;
+  sConfig.SamplingTime = ADC_SAMPLETIME_84CYCLES;
   if (HAL_ADC_ConfigChannel(&hadc1, &sConfig) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  /* USER CODE BEGIN ADC1_Init 2 */
-
-  /* USER CODE END ADC1_Init 2 */
-
-}
-
-/**
-  * @brief ADC2 Initialization Function
-  * @param None
-  * @retval None
-  */
-static void MX_ADC2_Init(void)
-{
-
-  /* USER CODE BEGIN ADC2_Init 0 */
-
-  /* USER CODE END ADC2_Init 0 */
-
-  ADC_ChannelConfTypeDef sConfig = {0};
-
-  /* USER CODE BEGIN ADC2_Init 1 */
-
-  /* USER CODE END ADC2_Init 1 */
-
-  /** Configure the global features of the ADC (Clock, Resolution, Data Alignment and number of conversion)
-  */
-  hadc2.Instance = ADC2;
-  hadc2.Init.ClockPrescaler = ADC_CLOCK_SYNC_PCLK_DIV4;
-  hadc2.Init.Resolution = ADC_RESOLUTION_12B;
-  hadc2.Init.ScanConvMode = DISABLE;
-  hadc2.Init.ContinuousConvMode = ENABLE;
-  hadc2.Init.DiscontinuousConvMode = DISABLE;
-  hadc2.Init.ExternalTrigConvEdge = ADC_EXTERNALTRIGCONVEDGE_NONE;
-  hadc2.Init.ExternalTrigConv = ADC_SOFTWARE_START;
-  hadc2.Init.DataAlign = ADC_DATAALIGN_RIGHT;
-  hadc2.Init.NbrOfConversion = 1;
-  hadc2.Init.DMAContinuousRequests = ENABLE;
-  hadc2.Init.EOCSelection = ADC_EOC_SINGLE_CONV;
-  if (HAL_ADC_Init(&hadc2) != HAL_OK)
   {
     Error_Handler();
   }
@@ -471,15 +462,14 @@ static void MX_ADC2_Init(void)
   /** Configure for the selected ADC regular channel its corresponding rank in the sequencer and its sample time.
   */
   sConfig.Channel = ADC_CHANNEL_3;
-  sConfig.Rank = 1;
-  sConfig.SamplingTime = ADC_SAMPLETIME_3CYCLES;
-  if (HAL_ADC_ConfigChannel(&hadc2, &sConfig) != HAL_OK)
+  sConfig.Rank = 2;
+  if (HAL_ADC_ConfigChannel(&hadc1, &sConfig) != HAL_OK)
   {
     Error_Handler();
   }
-  /* USER CODE BEGIN ADC2_Init 2 */
+  /* USER CODE BEGIN ADC1_Init 2 */
 
-  /* USER CODE END ADC2_Init 2 */
+  /* USER CODE END ADC1_Init 2 */
 
 }
 
@@ -604,9 +594,6 @@ static void MX_DMA_Init(void)
   /* DMA2_Stream0_IRQn interrupt configuration */
   HAL_NVIC_SetPriority(DMA2_Stream0_IRQn, 0, 0);
   HAL_NVIC_EnableIRQ(DMA2_Stream0_IRQn);
-  /* DMA2_Stream2_IRQn interrupt configuration */
-  HAL_NVIC_SetPriority(DMA2_Stream2_IRQn, 0, 0);
-  HAL_NVIC_EnableIRQ(DMA2_Stream2_IRQn);
 
 }
 
