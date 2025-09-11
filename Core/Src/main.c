@@ -42,16 +42,20 @@
 // GPIO definitions
 #define LED_PORT       GPIOC
 #define LED_PIN        GPIO_PIN_0
-#define DAC1_CS_PORT   GPIOA
-#define DAC1_CS_PIN    GPIO_PIN_0
-#define DAC2_CS_PORT   GPIOA
-#define DAC2_CS_PIN    GPIO_PIN_1
+#define DAC1_CS_PORT   GPIOA      //3
+#define DAC1_CS_PIN    GPIO_PIN_0 //3
+#define DAC2_CS_PORT   GPIOA	  //4
+#define DAC2_CS_PIN    GPIO_PIN_1 //4
 #define MUX_EN_PORT    GPIOC
 #define MUX_EN_PIN     GPIO_PIN_9
 
 // ADC Parameters
 #define ADC_REF_VOLTAGE 3.3f
 #define ADC_RESOLUTION  4095.0f
+
+// DAC Parameters
+#define DAC_REF_VOLTAGE 4.5f
+#define DAC_RESOLUTION  4095.0f
 
 // Speed amd CAN related parameters
 #define SPEED_CAN_ID   		  0x7E8
@@ -66,6 +70,9 @@
 //Scaling Factor limits
 #define Scale_Factor_Max 1.0f
 #define Scale_Factor_Min 0.0f
+
+//DAC BIAS
+#define DACBIAS 1.3
 
 /* USER CODE END PM */
 
@@ -94,10 +101,10 @@ char uartBuffer[100];
 volatile uint16_t adc_buf[2];
 
 // Pedal channel limits
-float PEDAL_CH1_VMIN = 1.56f; //THIS VALUE IS ASSUMED AND NEED TO BE CONFIRMED
-float PEDAL_CH1_VMAX = 4.435f; //THIS VALUE IS ASSUMED AND NEED TO BE CONFIRMED
-float PEDAL_CH2_VMIN = 0.769f; //THIS VALUE IS ASSUMED AND NEED TO BE CONFIRMED
-float PEDAL_CH2_VMAX = 3.644f; //THIS VALUE IS ASSUMED AND NEED TO BE CONFIRMED
+float PEDAL_CH1_VMIN = 1.56f;  // (IN4)
+float PEDAL_CH1_VMAX = 4.435f; // (IN4)
+float PEDAL_CH2_VMIN = 0.769f; // (IN3)
+float PEDAL_CH2_VMAX = 3.644f; // (IN3)
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -201,13 +208,22 @@ void DAC_Write(GPIO_TypeDef *cs_port, uint16_t cs_pin, uint16_t value)
     HAL_GPIO_WritePin(cs_port, cs_pin, GPIO_PIN_RESET); // CS LOW
     HAL_SPI_Transmit(&hspi1, data, 2, HAL_MAX_DELAY);
     snprintf(uartBuffer, sizeof(uartBuffer),
-             "DAC%d Write: Code=%u\r\n\n",
+             "DAC%d Write: Code=%u | data[0] = %X  | data[1] = %X  \r\n\n",
              (cs_pin == DAC1_CS_PIN) ? 1 : 2,
-             value);
+             value, data[0], data[1]);
     UART_SendString(uartBuffer);
 
     HAL_GPIO_WritePin(cs_port, cs_pin, GPIO_PIN_SET);
 }
+
+//Function to test DAC stand-alone
+/*void TestDAC(void) {
+
+    // Test DAC1
+    DAC_Write(DAC2_CS_PORT, DAC2_CS_PIN, 2048);  // ~50%   BLACK (MIDDLE) is DAC2 - OUT4
+    DAC_Write(DAC1_CS_PORT, DAC1_CS_PIN, 4095);  // ~100%  WHITE (SIDE)   is DAC1 - OUT3
+
+}*/
 
 // Convert ADC value to normalized pedal percentage
 float ReadPedalPercent(uint16_t adc_value, float voltage_min, float voltage_max){
@@ -217,15 +233,16 @@ float ReadPedalPercent(uint16_t adc_value, float voltage_min, float voltage_max)
 	float preproccsing_percent_current_voltage = (preproccsing_current_voltage - voltage_min) / (voltage_max - voltage_min);
 
 	snprintf(uartBuffer, sizeof(uartBuffer),
-	         "ADC=%u | Vin=%.2f V | Percent=%.2f%%\r\n\n",
+	         "ADC(code)=%u | Vin(raw)=%.2f V | Vin(restored)=%.2f V | Percent=%.8f%%\r\n\n",
 	         adc_value,
+			 preproccsing_current_voltage_divided,
 	         preproccsing_current_voltage,
 	         preproccsing_percent_current_voltage);
 	UART_SendString(uartBuffer);
 
-
-    if (preproccsing_percent_current_voltage <preproccsing_percent_current_voltage_Min) preproccsing_percent_current_voltage = preproccsing_percent_current_voltage_Min;
-    if (preproccsing_percent_current_voltage > preproccsing_percent_current_voltage_Max) preproccsing_percent_current_voltage = preproccsing_percent_current_voltage_Max;
+	//CLAMPING
+    // if (preproccsing_percent_current_voltage <preproccsing_percent_current_voltage_Min) preproccsing_percent_current_voltage = preproccsing_percent_current_voltage_Min;
+    // if (preproccsing_percent_current_voltage > preproccsing_percent_current_voltage_Max) preproccsing_percent_current_voltage = preproccsing_percent_current_voltage_Max;
 
     return preproccsing_percent_current_voltage;
 }
@@ -235,7 +252,7 @@ float ReadPedalPercent(uint16_t adc_value, float voltage_min, float voltage_max)
 uint16_t PercentToDACValue(float percent, float voltage_min, float voltage_max) {
 
     float afterprocessing_voltage = voltage_min + (percent * (voltage_max - voltage_min)); //Percentage to voltage
-    uint16_t dac_value = (uint16_t)((afterprocessing_voltage / 4.88f) * ADC_RESOLUTION); //DAC expects digital value CHECK THIS - WRONG REF VOLTAGE - changed ref to 4.88v(supply)
+    uint16_t dac_value = (uint16_t)((afterprocessing_voltage / DAC_REF_VOLTAGE) * DAC_RESOLUTION); //DAC expects digital value - Vref is 4.5 V
 
     snprintf(uartBuffer, sizeof(uartBuffer),
              "Attenuated=%.2f%% | Vout=%.2f V | DAC Code=%u\r\n\n",
@@ -244,8 +261,8 @@ uint16_t PercentToDACValue(float percent, float voltage_min, float voltage_max) 
              dac_value);
     UART_SendString(uartBuffer);
 
-
-    if (dac_value > ADC_RESOLUTION ) dac_value = ADC_RESOLUTION ;
+    //CLAMPING
+    // if (dac_value > ADC_RESOLUTION ) dac_value = ADC_RESOLUTION ;
     return dac_value;
 }
 
@@ -254,33 +271,43 @@ void AttenuationFunction(void){
 	float scale_factor;
 	float percent1, percent2, output_percent1, output_percent2;
 
-	percent1 = ReadPedalPercent(adc_buf[0], PEDAL_CH1_VMIN, PEDAL_CH1_VMAX); //Converts the raw value from adc to percentage
-	percent2 = ReadPedalPercent(adc_buf[1], PEDAL_CH2_VMIN, PEDAL_CH2_VMAX); //Converts the raw value from adc to percentage
+	percent1 = ReadPedalPercent(adc_buf[0], PEDAL_CH1_VMIN, PEDAL_CH1_VMAX); // 4 //Converts the raw value from adc to percentage
+	percent2 = ReadPedalPercent(adc_buf[1], PEDAL_CH2_VMIN, PEDAL_CH2_VMAX); // 3 //Converts the raw value from adc to percentage
+
 
 
     if(CarSpeed >= SPEED_THRESHOLD_KMH) {
 
         float overspeed = CarSpeed - SPEED_THRESHOLD_KMH;
+
         scale_factor = Scale_Factor_Max - (overspeed / (float)SPEED_FADE_RANGE_KMH);
-        if (scale_factor < Scale_Factor_Min) scale_factor = Scale_Factor_Min;
+
+        // if (scale_factor < Scale_Factor_Min) scale_factor = Scale_Factor_Min;
         output_percent1 = percent1 * scale_factor;
+;
         output_percent2 = percent2 * scale_factor;
+
     } else {
 
-        output_percent1 = percent1;
-        output_percent2 = percent2;
+        output_percent1 = percent1; //4
+
+        output_percent2 = percent2; //3
     }
 
-    uint16_t dac_value_1 = PercentToDACValue(output_percent1, PEDAL_CH1_VMIN, PEDAL_CH1_VMAX); //Converts percentage back to analog
-    uint16_t dac_value_2 = PercentToDACValue(output_percent2, PEDAL_CH2_VMIN, PEDAL_CH2_VMAX); //Converts percentage back to analog
+    snprintf(uartBuffer, sizeof(uartBuffer),
+              "P1 In:%.8f Out:%.8f | P2 In:%.8f Out:%.8f\r\n",
+              percent1, output_percent1, percent2, output_percent2);
+     UART_SendString(uartBuffer);
 
-    DAC_Write(DAC1_CS_PORT, DAC1_CS_PIN, dac_value_1);
-    DAC_Write(DAC2_CS_PORT, DAC2_CS_PIN, dac_value_2);
+    uint16_t dac_value_1 = PercentToDACValue(output_percent1, PEDAL_CH1_VMIN, PEDAL_CH1_VMAX); //Converts percentage back to analog //4
+    uint16_t dac_value_2 = PercentToDACValue(output_percent2, PEDAL_CH2_VMIN, PEDAL_CH2_VMAX); //Converts percentage back to analog //3
 
-   /* snprintf(uartBuffer, sizeof(uartBuffer),
-             " Scale: %.2f | P1 In:%.2f Out:%.2f | P2 In:%.2f Out:%.2f\r\n",
-             scale_factor, percent1, output_percent1, percent2, output_percent2);
-    UART_SendString(uartBuffer);*/
+
+
+    DAC_Write(DAC2_CS_PORT, DAC2_CS_PIN, dac_value_1); // dac2_cs_port for dac_value_1 - in4 - out4 - ch1 //4
+    DAC_Write(DAC1_CS_PORT, DAC1_CS_PIN, dac_value_2); // dac1_cs_port for dac_value_2 - in3 - out3 - ch2 //3
+
+
 }
 
 void UART_SendString(char *str)
@@ -325,6 +352,7 @@ int main(void)
   MX_CAN1_Init();
   MX_SPI1_Init();
   MX_USART1_UART_Init();
+  UART_SendString("Start \r\n");
   /* USER CODE BEGIN 2 */
   HAL_GPIO_WritePin(MUX_EN_PORT, MUX_EN_PIN, GPIO_PIN_SET);
   HAL_GPIO_WritePin(DAC1_CS_PORT, DAC1_CS_PIN, GPIO_PIN_SET);
@@ -352,10 +380,10 @@ int main(void)
   while (1)
   {
     /* USER CODE END WHILE */
-
+	  	//TestDAC();
 		RequestSpeed();
 		HAL_Delay(100); //Sending too fast causes STM CAN to fault out.
-		// Check if CAN messages stopped coming
+	    //Check if CAN messages stopped coming
 		if (HAL_GetTick() - lastCanMsgTick > 500)  // 500ms timeout
 		{
 		    CarSpeed = 0;   // fallback to 0 km/h
@@ -531,7 +559,7 @@ static void MX_SPI1_Init(void)
   hspi1.Init.Direction = SPI_DIRECTION_2LINES;
   hspi1.Init.DataSize = SPI_DATASIZE_8BIT;
   hspi1.Init.CLKPolarity = SPI_POLARITY_LOW;
-  hspi1.Init.CLKPhase = SPI_PHASE_1EDGE;
+  hspi1.Init.CLKPhase = SPI_PHASE_2EDGE;
   hspi1.Init.NSS = SPI_NSS_SOFT;
   hspi1.Init.BaudRatePrescaler = SPI_BAUDRATEPRESCALER_2;
   hspi1.Init.FirstBit = SPI_FIRSTBIT_MSB;
