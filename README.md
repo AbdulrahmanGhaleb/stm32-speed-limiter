@@ -24,9 +24,9 @@ The custom PCB integrates:
 
 3. **Processing (Attenuation Algorithm)**
 
-   * If speed < 30 km/h → pedal signal is passed directly.
-   * If 30–50 km/h → pedal signal is progressively attenuated.
-   * If ≥ 50 km/h → pedal input is effectively cut off.
+   * If speed < 20 km/h → pedal signal is passed directly.
+   * If 20–30 km/h → pedal signal is progressively attenuated.
+   * If ≥ 30 km/h → pedal input is effectively cut off.
 
 4. **STM32 → DAC → Multiplexer → ECU**
    Processed signals are converted back to analog via DACs and routed through the multiplexer to the ECU.
@@ -35,9 +35,9 @@ The custom PCB integrates:
 
 ## Functional Overview
 
-* **Normal Operation (< 30 km/h):** Pedal signals are passed through unchanged.
-* **Scaling Region (30–50 km/h):** Pedal signals are scaled down linearly.
-* **Cut-Off Region (≥ 50 km/h):** Pedal signals are suppressed (ECU sees minimal input).
+* **Normal Operation (< 20 km/h):** Pedal signals are passed through unchanged.
+* **Scaling Region (20–30 km/h):** Pedal signals are scaled down linearly.
+* **Cut-Off Region (≥ 30 km/h):** Pedal signals are suppressed (ECU sees minimal input).
 
 
 
@@ -72,18 +72,18 @@ The custom PCB integrates:
 
 ### 4. Pre-Threshold Functional Test
 
-* Accelerate to just below **30 km/h**.
+* Accelerate to just below **20 km/h**.
 * Confirm pedal works normally (no scaling yet).
 
 ### 5. Algorithm Activation Test (Scaling Region)
 
-* Cross **30 km/h threshold**.
-* Gradually accelerate toward 50 km/h.
+* Cross **20 km/h threshold**.
+* Gradually accelerate toward 30 km/h.
 * Confirm pedal sensitivity decreases progressively with speed.
 
 ### 6. Upper Limit Validation (Cut-Off Region)
 
-* Maintain speed **≥ 50 km/h**.
+* Maintain speed **≥ 30 km/h**.
 * Confirm pedal input is ignored (engine no longer responds to accelerator).
 
 ### 7. Recovery
