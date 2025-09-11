@@ -2,8 +2,8 @@
 ../Core/Src/stm32f4xx_hal_msp.c:87:6:HAL_ADC_MspInit	3
 ../Core/Src/stm32f4xx_hal_msp.c:144:6:HAL_ADC_MspDeInit	2
 ../Core/Src/stm32f4xx_hal_msp.c:178:6:HAL_CAN_MspInit	2
-../Core/Src/stm32f4xx_hal_msp.c:215:6:HAL_CAN_MspDeInit	2
-../Core/Src/stm32f4xx_hal_msp.c:244:6:HAL_SPI_MspInit	2
-../Core/Src/stm32f4xx_hal_msp.c:281:6:HAL_SPI_MspDeInit	2
-../Core/Src/stm32f4xx_hal_msp.c:310:6:HAL_UART_MspInit	2
-../Core/Src/stm32f4xx_hal_msp.c:347:6:HAL_UART_MspDeInit	2
+../Core/Src/stm32f4xx_hal_msp.c:218:6:HAL_CAN_MspDeInit	2
+../Core/Src/stm32f4xx_hal_msp.c:249:6:HAL_SPI_MspInit	2
+../Core/Src/stm32f4xx_hal_msp.c:286:6:HAL_SPI_MspDeInit	2
+../Core/Src/stm32f4xx_hal_msp.c:315:6:HAL_UART_MspInit	2
+../Core/Src/stm32f4xx_hal_msp.c:352:6:HAL_UART_MspDeInit	2

@@ -59,8 +59,8 @@
 
 // Speed amd CAN related parameters
 #define SPEED_CAN_ID   		  0x7E8
-#define SPEED_THRESHOLD_KMH   30
-#define SPEED_FADE_RANGE_KMH  20
+#define SPEED_THRESHOLD_KMH   20
+#define SPEED_FADE_RANGE_KMH  10
 
 //Pedal processing parameters
 #define VoltageRestoreFactor 2.0f
@@ -89,7 +89,7 @@ UART_HandleTypeDef huart1;
 /* USER CODE BEGIN PV */
 // CAN reception
 CAN_RxHeaderTypeDef RxHeader;
-uint8_t CANResponse[8];
+uint8_t RxData[8];
 volatile uint16_t CarSpeed = 0;
 volatile uint32_t lastCanMsgTick = 0;
 
@@ -127,6 +127,7 @@ void UART_SendString(char *str);
 // CAN Messages filter
 void CAN_Filter_Config(void)
 {
+	UART_SendString("1\r\n");
     CAN_FilterTypeDef sFilterConfig;
 
     // Configure filter for speed messages only
@@ -145,10 +146,12 @@ void CAN_Filter_Config(void)
     {
         Error_Handler();
     }
+    UART_SendString("2\r\n");
 }
 
 // OBD-II PID Speed Request
 void RequestSpeed(){
+
 	CAN_TxHeaderTypeDef TxHeader;
 	uint8_t TxData[8] = {0x02, 0x01, 0x0D, 0x00, 0x00, 0x00, 0x00, 0x00};
 	uint32_t TxMailbox;
@@ -167,21 +170,23 @@ void RequestSpeed(){
 }
 
 // Speed extraction
-void ProcessSpeedMessage(CAN_RxHeaderTypeDef *rxHeader, uint8_t *CANResponse)
+void ProcessSpeedMessage(CAN_RxHeaderTypeDef *rxHeader, uint8_t *rxData)
 {
 	if (rxHeader->StdId == SPEED_CAN_ID) {
-
-		CarSpeed = CANResponse[3];
-		lastCanMsgTick = HAL_GetTick();
-
+		CarSpeed = rxData[3];
+        // Format message for UART
         snprintf(uartBuffer, sizeof(uartBuffer),
                 "Message Received!\r\nID: 0x%03lX\r\nData: %02X %02X %02X %02X %02X %02X %02X %02X\r\n\r\n Speed:%02X\r\n",
                 rxHeader->StdId,
-				CANResponse[0], CANResponse[1], CANResponse[2], CANResponse[3],
-				CANResponse[4], CANResponse[5], CANResponse[6], CANResponse[7],
-				CANResponse[3]);
+                rxData[0], rxData[1], rxData[2], rxData[3],
+                rxData[4], rxData[5], rxData[6], rxData[7],
+				rxData[3]);
 
+        // Send to UART
         UART_SendString(uartBuffer);
+
+
+
 	}
 
 }
@@ -189,9 +194,11 @@ void ProcessSpeedMessage(CAN_RxHeaderTypeDef *rxHeader, uint8_t *CANResponse)
 //CAN Response upon interrupt callback
 void HAL_CAN_RxFifo0MsgPendingCallback(CAN_HandleTypeDef *hcan)
 {
-    if (HAL_CAN_GetRxMessage(hcan, CAN_RX_FIFO0, &RxHeader, CANResponse) == HAL_OK)
+
+    if (HAL_CAN_GetRxMessage(hcan, CAN_RX_FIFO0, &RxHeader, RxData) == HAL_OK)
     {
-        ProcessSpeedMessage(&RxHeader, CANResponse);
+        ProcessSpeedMessage(&RxHeader, RxData);
+
     }
 }
 
@@ -229,7 +236,7 @@ void DAC_Write(GPIO_TypeDef *cs_port, uint16_t cs_pin, uint16_t value)
 float ReadPedalPercent(uint16_t adc_value, float voltage_min, float voltage_max){
 
 	float preproccsing_current_voltage_divided = ((float)adc_value / ADC_RESOLUTION)*ADC_REF_VOLTAGE;
-	float preproccsing_current_voltage = preproccsing_current_voltage_divided * VoltageRestoreFactor;
+	float preproccsing_current_voltage = preproccsing_current_voltage_divided * VoltageRestoreFactor; //To restore what voltage divider effect
 	float preproccsing_percent_current_voltage = (preproccsing_current_voltage - voltage_min) / (voltage_max - voltage_min);
 
 	snprintf(uartBuffer, sizeof(uartBuffer),
@@ -277,32 +284,38 @@ void AttenuationFunction(void){
 
 
     if(CarSpeed >= SPEED_THRESHOLD_KMH) {
-
+    	HAL_GPIO_WritePin(MUX_EN_PORT, MUX_EN_PIN, GPIO_PIN_SET);
         float overspeed = CarSpeed - SPEED_THRESHOLD_KMH;
 
         scale_factor = Scale_Factor_Max - (overspeed / (float)SPEED_FADE_RANGE_KMH);
 
-        // if (scale_factor < Scale_Factor_Min) scale_factor = Scale_Factor_Min;
+        	if (scale_factor < Scale_Factor_Min) scale_factor = Scale_Factor_Min;
+
         output_percent1 = percent1 * scale_factor;
-;
+
         output_percent2 = percent2 * scale_factor;
 
+
     } else {
+    	HAL_GPIO_WritePin(MUX_EN_PORT, MUX_EN_PIN, GPIO_PIN_RESET);
+        //output_percent1 = percent1; //4
 
-        output_percent1 = percent1; //4
+        //output_percent2 = percent2; //3
 
-        output_percent2 = percent2; //3
     }
 
     snprintf(uartBuffer, sizeof(uartBuffer),
-              "P1 In:%.8f Out:%.8f | P2 In:%.8f Out:%.8f\r\n",
+              "P1 In:%.8f Out (4):%.8f | P2 In:%.8f Out (3):%.8f\r\n",
               percent1, output_percent1, percent2, output_percent2);
-     UART_SendString(uartBuffer);
+    UART_SendString(uartBuffer);
 
     uint16_t dac_value_1 = PercentToDACValue(output_percent1, PEDAL_CH1_VMIN, PEDAL_CH1_VMAX); //Converts percentage back to analog //4
     uint16_t dac_value_2 = PercentToDACValue(output_percent2, PEDAL_CH2_VMIN, PEDAL_CH2_VMAX); //Converts percentage back to analog //3
 
-
+    snprintf(uartBuffer, sizeof(uartBuffer),
+              "DAC_VALUE1:%u | DAC_VALUE2:%u\r\n",
+			  dac_value_1, dac_value_2);
+    UART_SendString(uartBuffer);
 
     DAC_Write(DAC2_CS_PORT, DAC2_CS_PIN, dac_value_1); // dac2_cs_port for dac_value_1 - in4 - out4 - ch1 //4
     DAC_Write(DAC1_CS_PORT, DAC1_CS_PIN, dac_value_2); // dac1_cs_port for dac_value_2 - in3 - out3 - ch2 //3
@@ -352,16 +365,7 @@ int main(void)
   MX_CAN1_Init();
   MX_SPI1_Init();
   MX_USART1_UART_Init();
-  UART_SendString("Start \r\n");
   /* USER CODE BEGIN 2 */
-  HAL_GPIO_WritePin(MUX_EN_PORT, MUX_EN_PIN, GPIO_PIN_SET);
-  HAL_GPIO_WritePin(DAC1_CS_PORT, DAC1_CS_PIN, GPIO_PIN_SET);
-  HAL_GPIO_WritePin(DAC2_CS_PORT, DAC2_CS_PIN, GPIO_PIN_SET);
-  UART_SendString("Befor ADC dual channel Config\r\n");
-
-  HAL_ADC_Start_DMA(&hadc1, (uint32_t*)adc_buf, 2);
-  UART_SendString("After ADC dual channel Config\r\n");
-
   CAN_Filter_Config();
 
   if (HAL_CAN_Start(&hcan1) != HAL_OK) //Starts CAN peripheral
@@ -373,6 +377,15 @@ int main(void)
   {
       Error_Handler();
   }
+  HAL_GPIO_WritePin(MUX_EN_PORT, MUX_EN_PIN, GPIO_PIN_SET);
+  HAL_GPIO_WritePin(DAC1_CS_PORT, DAC1_CS_PIN, GPIO_PIN_SET);
+  HAL_GPIO_WritePin(DAC2_CS_PORT, DAC2_CS_PIN, GPIO_PIN_SET);
+  UART_SendString("Befor ADC dual channel Config\r\n");
+
+  HAL_ADC_Start_DMA(&hadc1, (uint32_t*)adc_buf, 2);
+  UART_SendString("After ADC dual channel Config\r\n");
+
+
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -384,10 +397,10 @@ int main(void)
 		RequestSpeed();
 		HAL_Delay(100); //Sending too fast causes STM CAN to fault out.
 	    //Check if CAN messages stopped coming
-		if (HAL_GetTick() - lastCanMsgTick > 500)  // 500ms timeout
+		/*if (HAL_GetTick() - lastCanMsgTick > 500)  // 500ms timeout
 		{
 		    CarSpeed = 0;   // fallback to 0 km/h
-		}
+		}*/
 
 		AttenuationFunction();
     /* USER CODE BEGIN 3 */
@@ -559,7 +572,7 @@ static void MX_SPI1_Init(void)
   hspi1.Init.Direction = SPI_DIRECTION_2LINES;
   hspi1.Init.DataSize = SPI_DATASIZE_8BIT;
   hspi1.Init.CLKPolarity = SPI_POLARITY_LOW;
-  hspi1.Init.CLKPhase = SPI_PHASE_2EDGE;
+  hspi1.Init.CLKPhase = SPI_PHASE_1EDGE;
   hspi1.Init.NSS = SPI_NSS_SOFT;
   hspi1.Init.BaudRatePrescaler = SPI_BAUDRATEPRESCALER_2;
   hspi1.Init.FirstBit = SPI_FIRSTBIT_MSB;
